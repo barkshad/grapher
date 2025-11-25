@@ -2,12 +2,24 @@ import React, { useState, useRef } from 'react';
 import { Photo } from '../types';
 import { savePhoto, resizeImage, deletePhoto } from '../services/storageUtils';
 import { analyzeImage } from '../services/geminiService';
-import { Trash2, Upload, Sparkles, X, Plus, Image as ImageIcon, Loader2, LogOut, Cloud, Lock } from 'lucide-react';
+import { Trash2, Upload, Sparkles, X, Plus, Image as ImageIcon, Loader2, LogOut, Cloud, Lock, ChevronUp, ChevronDown, CheckCircle, AlertCircle } from 'lucide-react';
 
 interface AdminPanelProps {
   photos: Photo[];
   refreshPhotos: () => Promise<void>;
   onExit: () => void;
+}
+
+interface UploadItem {
+  id: string; // Temporary ID for list management
+  file: File;
+  preview: string;
+  title: string;
+  description: string;
+  tags: string;
+  analyzing: boolean;
+  status: 'idle' | 'publishing' | 'success' | 'error';
+  progress: number;
 }
 
 export const AdminPanel: React.FC<AdminPanelProps> = ({ photos, refreshPhotos, onExit }) => {
@@ -72,39 +84,40 @@ interface DashboardProps {
 }
 
 const Dashboard: React.FC<DashboardProps> = ({ photos, refreshPhotos, onLogout }) => {
-  const [isUploading, setIsUploading] = useState(false);
+  const [isProcessingFiles, setIsProcessingFiles] = useState(false);
   const [isPublishing, setIsPublishing] = useState(false);
-  const [uploads, setUploads] = useState<{
-    file: File;
-    preview: string;
-    title: string;
-    description: string;
-    tags: string;
-    analyzing: boolean;
-  }[]>([]);
+  const [uploads, setUploads] = useState<UploadItem[]>([]);
   
+  // Computed global progress
+  const totalItems = uploads.length;
+  const completedItems = uploads.filter(u => u.status === 'success').length;
+  const globalProgress = totalItems === 0 ? 0 : (completedItems / totalItems) * 100;
+
   const fileInputRef = useRef<HTMLInputElement>(null);
 
   const handleFileSelect = async (e: React.ChangeEvent<HTMLInputElement>) => {
     if (e.target.files) {
       const files = Array.from(e.target.files) as File[];
-      setIsUploading(true);
+      setIsProcessingFiles(true);
       
       const newUploads = await Promise.all(files.map(async (file) => {
         // Resize for storage optimization
         const resized = await resizeImage(file, 1600, 0.85); 
         return {
+          id: crypto.randomUUID(),
           file,
           preview: resized,
           title: '',
           description: '',
           tags: '',
-          analyzing: false
-        };
+          analyzing: false,
+          status: 'idle',
+          progress: 0
+        } as UploadItem;
       }));
 
       setUploads(prev => [...prev, ...newUploads]);
-      setIsUploading(false);
+      setIsProcessingFiles(false);
       if (fileInputRef.current) fileInputRef.current.value = '';
     }
   };
@@ -113,7 +126,20 @@ const Dashboard: React.FC<DashboardProps> = ({ photos, refreshPhotos, onLogout }
     setUploads(prev => prev.filter((_, i) => i !== index));
   };
 
-  const updateUploadField = (index: number, field: string, value: string) => {
+  const moveUpload = (index: number, direction: 'up' | 'down') => {
+    if (isPublishing) return;
+    setUploads(prev => {
+      const copy = [...prev];
+      const targetIndex = direction === 'up' ? index - 1 : index + 1;
+      
+      if (targetIndex < 0 || targetIndex >= copy.length) return prev;
+      
+      [copy[index], copy[targetIndex]] = [copy[targetIndex], copy[index]];
+      return copy;
+    });
+  };
+
+  const updateUploadField = (index: number, field: keyof UploadItem, value: any) => {
     setUploads(prev => {
       const copy = [...prev];
       copy[index] = { ...copy[index], [field]: value };
@@ -125,11 +151,7 @@ const Dashboard: React.FC<DashboardProps> = ({ photos, refreshPhotos, onLogout }
     const item = uploads[index];
     if (!item.preview) return;
 
-    setUploads(prev => {
-      const copy = [...prev];
-      copy[index].analyzing = true;
-      return copy;
-    });
+    updateUploadField(index, 'analyzing', true);
 
     try {
       const result = await analyzeImage(item.preview);
@@ -147,20 +169,23 @@ const Dashboard: React.FC<DashboardProps> = ({ photos, refreshPhotos, onLogout }
     } catch (err) {
       console.error(err);
       alert("AI Analysis failed. Check API key configuration.");
-      setUploads(prev => {
-        const copy = [...prev];
-        copy[index].analyzing = false;
-        return copy;
-      });
+      updateUploadField(index, 'analyzing', false);
     }
   };
 
   const handlePublishAll = async () => {
     setIsPublishing(true);
-    let count = 0;
     
-    try {
-      const promises = uploads.map(item => {
+    // Process strictly sequentially to allow precise progress tracking and avoid overwhelming DB
+    for (let i = 0; i < uploads.length; i++) {
+      const item = uploads[i];
+      if (item.status === 'success') continue; // Skip already finished ones
+
+      // Set to publishing
+      updateUploadField(i, 'status', 'publishing');
+      updateUploadField(i, 'progress', 20); // Started
+
+      try {
         const finalTitle = item.title || "Untitled";
         
         const newPhoto: Photo = {
@@ -169,22 +194,37 @@ const Dashboard: React.FC<DashboardProps> = ({ photos, refreshPhotos, onLogout }
           title: finalTitle,
           description: item.description,
           tags: item.tags.split(',').map(t => t.trim()).filter(t => t),
-          dateUploaded: Date.now()
+          dateUploaded: Date.now() + i // slight offset to preserve sort order if dates are identical
         };
-        return savePhoto(newPhoto);
-      });
 
-      await Promise.all(promises);
-      count = promises.length;
+        // Simulate a tiny network/processing delay for better UX (so progress bar is visible)
+        await new Promise(r => setTimeout(r, 400));
+        updateUploadField(i, 'progress', 60);
+        
+        await savePhoto(newPhoto);
+        
+        updateUploadField(i, 'progress', 100);
+        updateUploadField(i, 'status', 'success');
 
-      setUploads([]);
-      await refreshPhotos();
-      alert(`Successfully published ${count} photos to the gallery.`);
-    } catch (error) {
-      console.error("Publishing error:", error);
-      alert("Failed to publish some photos.");
-    } finally {
-      setIsPublishing(false);
+      } catch (error) {
+        console.error("Publishing error:", error);
+        updateUploadField(i, 'status', 'error');
+        updateUploadField(i, 'progress', 0);
+      }
+    }
+
+    await refreshPhotos();
+    
+    // If all success, clear after a brief delay
+    if (uploads.every(u => u.status === 'success')) {
+       setTimeout(() => {
+          setUploads([]);
+          setIsPublishing(false);
+          alert(`Successfully published ${uploads.length} photos.`);
+       }, 500);
+    } else {
+       setIsPublishing(false);
+       alert("Finished with some errors. Check the list.");
     }
   };
 
@@ -222,21 +262,32 @@ const Dashboard: React.FC<DashboardProps> = ({ photos, refreshPhotos, onLogout }
             Upload New Photos
           </h3>
           {uploads.length > 0 && (
-             <button 
-               onClick={handlePublishAll}
-               disabled={isPublishing}
-               className="w-full sm:w-auto bg-white text-black px-6 py-3 rounded-xl font-bold text-sm hover:bg-gray-200 transition-all disabled:opacity-50 flex items-center justify-center gap-2 shadow-lg shadow-white/5"
-             >
-               {isPublishing ? <Loader2 className="animate-spin" size={18} /> : <Cloud size={18} />}
-               {isPublishing ? 'Syncing to Gallery...' : `Publish ${uploads.length} Photos`}
-             </button>
+             <div className="w-full sm:w-auto flex flex-col gap-2">
+                <button 
+                  onClick={handlePublishAll}
+                  disabled={isPublishing}
+                  className="w-full sm:w-auto bg-white text-black px-6 py-3 rounded-xl font-bold text-sm hover:bg-gray-200 transition-all disabled:opacity-50 flex items-center justify-center gap-2 shadow-lg shadow-white/5"
+                >
+                  {isPublishing ? <Loader2 className="animate-spin" size={18} /> : <Cloud size={18} />}
+                  {isPublishing ? `Publishing...` : `Publish ${uploads.length} Photos`}
+                </button>
+                {/* Global Progress Bar */}
+                {isPublishing && (
+                  <div className="w-full h-1.5 bg-white/10 rounded-full overflow-hidden">
+                    <div 
+                      className="h-full bg-accent transition-all duration-300 ease-out"
+                      style={{ width: `${globalProgress}%` }}
+                    />
+                  </div>
+                )}
+             </div>
           )}
         </div>
 
         {uploads.length === 0 ? (
           <div 
-            onClick={() => !isUploading && fileInputRef.current?.click()}
-            className={`border-2 border-dashed border-white/10 rounded-2xl p-12 sm:p-16 flex flex-col items-center justify-center text-secondary transition-all cursor-pointer group bg-background/50 ${isUploading ? 'opacity-50' : 'hover:border-accent/50 hover:bg-accent/5'}`}
+            onClick={() => !isProcessingFiles && fileInputRef.current?.click()}
+            className={`border-2 border-dashed border-white/10 rounded-2xl p-12 sm:p-16 flex flex-col items-center justify-center text-secondary transition-all cursor-pointer group bg-background/50 ${isProcessingFiles ? 'opacity-50' : 'hover:border-accent/50 hover:bg-accent/5'}`}
           >
             <input 
               type="file" 
@@ -245,16 +296,16 @@ const Dashboard: React.FC<DashboardProps> = ({ photos, refreshPhotos, onLogout }
               className="hidden" 
               ref={fileInputRef}
               onChange={handleFileSelect}
-              disabled={isUploading}
+              disabled={isProcessingFiles}
             />
-            {isUploading ? (
+            {isProcessingFiles ? (
                 <Loader2 className="animate-spin mb-4 text-accent" size={48} />
             ) : (
                 <div className="w-16 h-16 rounded-full bg-white/5 flex items-center justify-center mb-4 group-hover:scale-110 transition-transform">
                     <ImageIcon className="text-white/50 group-hover:text-accent transition-colors" size={32} />
                 </div>
             )}
-            <p className="font-bold text-lg text-white mb-2">{isUploading ? 'Processing images...' : 'Click to select photos'}</p>
+            <p className="font-bold text-lg text-white mb-2">{isProcessingFiles ? 'Processing images...' : 'Click to select photos'}</p>
             <p className="text-sm text-secondary text-center max-w-sm">
                 High-resolution images supported. Photos are stored permanently in the secure database.
             </p>
@@ -263,15 +314,65 @@ const Dashboard: React.FC<DashboardProps> = ({ photos, refreshPhotos, onLogout }
           <div className="space-y-4">
             <div className="max-h-[600px] overflow-y-auto pr-2 space-y-4 custom-scrollbar">
                 {uploads.map((upload, idx) => (
-                <div key={idx} className="bg-background/80 backdrop-blur rounded-xl p-4 flex flex-col md:flex-row gap-6 relative animate-fade-in border border-white/5 hover:border-white/10 transition-colors">
-                    <button onClick={() => removeUpload(idx)} className="absolute top-4 right-4 p-2 text-white/20 hover:text-red-500 hover:bg-red-500/10 rounded-full transition-colors z-10">
-                        <X size={20} />
-                    </button>
+                <div key={upload.id} className={`bg-background/80 backdrop-blur rounded-xl p-4 flex flex-col md:flex-row gap-6 relative animate-fade-in border transition-colors ${upload.status === 'error' ? 'border-red-500/30' : upload.status === 'success' ? 'border-green-500/30' : 'border-white/5 hover:border-white/10'}`}>
                     
+                    {/* Delete Button */}
+                    {!isPublishing && (
+                      <button onClick={() => removeUpload(idx)} className="absolute top-4 right-4 p-2 text-white/20 hover:text-red-500 hover:bg-red-500/10 rounded-full transition-colors z-10">
+                          <X size={20} />
+                      </button>
+                    )}
+
+                    {/* Reorder Controls */}
+                    {!isPublishing && (
+                       <div className="absolute left-2 top-1/2 -translate-y-1/2 flex flex-col gap-1 z-10 opacity-0 md:group-hover:opacity-100 transition-opacity">
+                          <button 
+                            onClick={() => moveUpload(idx, 'up')}
+                            disabled={idx === 0}
+                            className="p-1 bg-white/10 hover:bg-white/20 rounded text-white disabled:opacity-20"
+                          >
+                             <ChevronUp size={16} />
+                          </button>
+                          <button 
+                            onClick={() => moveUpload(idx, 'down')}
+                            disabled={idx === uploads.length - 1}
+                            className="p-1 bg-white/10 hover:bg-white/20 rounded text-white disabled:opacity-20"
+                          >
+                             <ChevronDown size={16} />
+                          </button>
+                       </div>
+                    )}
+                    
+                    {/* Image Preview & Progress */}
                     <div className="w-full md:w-64 aspect-video md:aspect-[4/3] rounded-lg overflow-hidden bg-black/50 flex-shrink-0 shadow-lg relative group">
-                        <img src={upload.preview} alt="Preview" className="w-full h-full object-cover" />
-                        <div className="absolute inset-0 bg-black/40 opacity-0 group-hover:opacity-100 transition-opacity flex items-center justify-center">
-                            <span className="text-xs font-mono text-white/70">PREVIEW</span>
+                        <img 
+                          src={upload.preview} 
+                          alt="Preview" 
+                          className={`w-full h-full object-cover transition-opacity ${upload.status === 'success' ? 'opacity-50' : ''}`} 
+                        />
+                        
+                        {/* Status Overlays */}
+                        <div className="absolute inset-0 flex items-center justify-center pointer-events-none">
+                            {upload.status === 'publishing' && (
+                                <div className="w-full h-full bg-black/50 flex flex-col items-center justify-center p-4">
+                                   <Loader2 className="animate-spin text-white mb-2" size={24} />
+                                   <div className="w-full h-1 bg-white/20 rounded-full overflow-hidden max-w-[100px]">
+                                      <div className="h-full bg-accent transition-all duration-300" style={{ width: `${upload.progress}%` }}></div>
+                                   </div>
+                                </div>
+                            )}
+                            {upload.status === 'success' && (
+                                <div className="flex flex-col items-center text-green-400">
+                                   <CheckCircle size={32} />
+                                   <span className="text-xs font-bold mt-1">UPLOADED</span>
+                                </div>
+                            )}
+                            {upload.status === 'error' && (
+                                <div className="flex flex-col items-center text-red-400">
+                                   <AlertCircle size={32} />
+                                   <span className="text-xs font-bold mt-1">FAILED</span>
+                                </div>
+                            )}
                         </div>
                     </div>
 
@@ -284,13 +385,14 @@ const Dashboard: React.FC<DashboardProps> = ({ photos, refreshPhotos, onLogout }
                                 placeholder="Give this moment a name..." 
                                 value={upload.title}
                                 onChange={(e) => updateUploadField(idx, 'title', e.target.value)}
-                                className="w-full bg-surface border border-white/10 rounded-lg px-4 py-2.5 text-sm text-white focus:border-accent focus:outline-none transition-colors"
+                                disabled={isPublishing || upload.status === 'success'}
+                                className="w-full bg-surface border border-white/10 rounded-lg px-4 py-2.5 text-sm text-white focus:border-accent focus:outline-none transition-colors disabled:opacity-50"
                             />
                             </div>
                             <div className="pt-6">
                                 <button 
                                 onClick={() => handleAIAnalyze(idx)}
-                                disabled={upload.analyzing}
+                                disabled={upload.analyzing || isPublishing || upload.status === 'success'}
                                 className="h-[42px] px-4 flex items-center gap-2 bg-gradient-to-r from-purple-500/10 to-accent/10 text-accent border border-accent/20 rounded-lg text-xs font-bold hover:from-purple-500/20 hover:to-accent/20 transition-all disabled:opacity-50 whitespace-nowrap"
                                 title="Auto-generate title, description and tags"
                                 >
@@ -306,7 +408,8 @@ const Dashboard: React.FC<DashboardProps> = ({ photos, refreshPhotos, onLogout }
                                 placeholder="What's the story behind this photo?" 
                                 value={upload.description}
                                 onChange={(e) => updateUploadField(idx, 'description', e.target.value)}
-                                className="w-full bg-surface border border-white/10 rounded-lg px-4 py-3 text-sm text-white focus:border-accent focus:outline-none h-24 resize-none transition-colors"
+                                disabled={isPublishing || upload.status === 'success'}
+                                className="w-full bg-surface border border-white/10 rounded-lg px-4 py-3 text-sm text-white focus:border-accent focus:outline-none h-24 resize-none transition-colors disabled:opacity-50"
                             />
                         </div>
 
@@ -317,7 +420,8 @@ const Dashboard: React.FC<DashboardProps> = ({ photos, refreshPhotos, onLogout }
                                 placeholder="nature, portrait, bw (comma separated)" 
                                 value={upload.tags}
                                 onChange={(e) => updateUploadField(idx, 'tags', e.target.value)}
-                                className="w-full bg-surface border border-white/10 rounded-lg px-4 py-2.5 text-sm text-white focus:border-accent focus:outline-none transition-colors"
+                                disabled={isPublishing || upload.status === 'success'}
+                                className="w-full bg-surface border border-white/10 rounded-lg px-4 py-2.5 text-sm text-white focus:border-accent focus:outline-none transition-colors disabled:opacity-50"
                             />
                         </div>
                     </div>
@@ -327,7 +431,7 @@ const Dashboard: React.FC<DashboardProps> = ({ photos, refreshPhotos, onLogout }
              
              <div 
                onClick={() => !isPublishing && fileInputRef.current?.click()}
-               className="border border-dashed border-white/10 rounded-xl p-4 flex items-center justify-center text-secondary hover:bg-white/5 hover:text-white cursor-pointer transition-all gap-2"
+               className={`border border-dashed border-white/10 rounded-xl p-4 flex items-center justify-center text-secondary hover:bg-white/5 hover:text-white cursor-pointer transition-all gap-2 ${isPublishing ? 'opacity-30 pointer-events-none' : ''}`}
              >
                 <input 
                   type="file" 
