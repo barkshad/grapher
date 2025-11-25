@@ -3,17 +3,17 @@ import { Layout } from './components/Layout';
 import { Gallery } from './components/Gallery';
 import { AdminPanel } from './components/AdminPanel';
 import { Lightbox } from './components/Lightbox';
-import { Photo } from './types';
+import { Photo, ViewMode } from './types';
 import { getPhotos, initStorage } from './services/storageUtils';
 import { Loader2 } from 'lucide-react';
 
 function App() {
   const [photos, setPhotos] = useState<Photo[]>([]);
   const [selectedPhoto, setSelectedPhoto] = useState<Photo | null>(null);
-  const [currentPage, setCurrentPage] = useState<'gallery' | 'admin'>('gallery');
   const [isLoading, setIsLoading] = useState(true);
+  const [currentView, setCurrentView] = useState<ViewMode>(ViewMode.GALLERY);
 
-  // Load photos on mount
+  // Initialize storage and load photos on mount
   useEffect(() => {
     const initialize = async () => {
       try {
@@ -29,8 +29,12 @@ function App() {
   }, []);
 
   const refreshPhotos = async () => {
-    const loadedPhotos = await getPhotos();
-    setPhotos(loadedPhotos);
+    try {
+      const loadedPhotos = await getPhotos();
+      setPhotos(loadedPhotos);
+    } catch (error) {
+      console.error("Failed to refresh photos:", error);
+    }
   };
 
   if (isLoading) {
@@ -38,7 +42,7 @@ function App() {
       <div className="min-h-screen bg-background flex items-center justify-center text-white">
         <div className="flex flex-col items-center gap-4">
             <Loader2 className="animate-spin text-accent" size={48} />
-            <p className="text-secondary">Loading Portfolio...</p>
+            <p className="text-secondary tracking-widest uppercase text-sm">Loading Portfolio...</p>
         </div>
       </div>
     );
@@ -46,14 +50,19 @@ function App() {
   
   return (
     <>
-      <Layout 
-        currentPage={currentPage} 
-        onNavigate={(page) => setCurrentPage(page)}
-      >
-        {currentPage === 'gallery' ? (
-           <Gallery photos={photos} onPhotoClick={setSelectedPhoto} />
-        ) : (
-           <AdminPanel photos={photos} refreshPhotos={refreshPhotos} />
+      <Layout currentView={currentView} onNavigate={setCurrentView}>
+        {currentView === ViewMode.GALLERY && (
+          <Gallery 
+            photos={photos} 
+            onPhotoClick={setSelectedPhoto} 
+          />
+        )}
+        {currentView === ViewMode.ADMIN && (
+          <AdminPanel 
+            photos={photos} 
+            refreshPhotos={refreshPhotos}
+            onExit={() => setCurrentView(ViewMode.GALLERY)}
+          />
         )}
       </Layout>
 
