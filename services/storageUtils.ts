@@ -4,6 +4,7 @@ const DB_NAME = 'LuminaPortfolioDB';
 const STORE_NAME = 'photos';
 const DB_VERSION = 1;
 const LOCAL_STORAGE_KEY = 'lumina_portfolio_photos';
+const INIT_FLAG_KEY = 'lumina_initialized';
 
 // Initial mock data to populate if empty
 const INITIAL_PHOTOS: Photo[] = [
@@ -76,6 +77,12 @@ const openDB = (): Promise<IDBDatabase> => {
 export const initStorage = async (): Promise<void> => {
   const db = await openDB();
   
+  // If we have already initialized the app once, do not re-seed data even if DB is empty (user deleted all).
+  const isInitialized = localStorage.getItem(INIT_FLAG_KEY);
+  if (isInitialized) {
+    return;
+  }
+
   return new Promise((resolve, reject) => {
     const transaction = db.transaction([STORE_NAME], 'readwrite');
     const store = transaction.objectStore(STORE_NAME);
@@ -97,10 +104,13 @@ export const initStorage = async (): Promise<void> => {
             INITIAL_PHOTOS.forEach(photo => store.add(photo));
           }
         } else {
-          // Seed with initial data
+          // Seed with initial data only on first run
           INITIAL_PHOTOS.forEach(photo => store.add(photo));
         }
       }
+      
+      // Mark as initialized so future reloads don't re-seed deleted data
+      localStorage.setItem(INIT_FLAG_KEY, 'true');
       resolve();
     };
 
