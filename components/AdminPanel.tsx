@@ -1,4 +1,4 @@
-import React, { useState, useRef, useEffect } from 'react';
+import React, { useState, useRef } from 'react';
 import { Photo } from '../types';
 import { savePhoto, resizeImage, deletePhoto } from '../services/storageUtils';
 import { analyzeImage } from '../services/geminiService';
@@ -6,7 +6,7 @@ import { Trash2, Upload, Sparkles, X, Plus, Image as ImageIcon, Loader2, LogOut 
 
 interface AdminPanelProps {
   photos: Photo[];
-  refreshPhotos: () => void;
+  refreshPhotos: () => Promise<void>;
 }
 
 export const AdminPanel: React.FC<AdminPanelProps> = ({ photos, refreshPhotos }) => {
@@ -54,13 +54,13 @@ export const AdminPanel: React.FC<AdminPanelProps> = ({ photos, refreshPhotos })
 
 interface DashboardProps {
   photos: Photo[];
-  refreshPhotos: () => void;
+  refreshPhotos: () => Promise<void>;
   onLogout: () => void;
 }
 
 const Dashboard: React.FC<DashboardProps> = ({ photos, refreshPhotos, onLogout }) => {
   const [isUploading, setIsUploading] = useState(false);
-  const [selectedFiles, setSelectedFiles] = useState<File[]>([]);
+  const [isPublishing, setIsPublishing] = useState(false);
   const [uploads, setUploads] = useState<{
     file: File;
     preview: string;
@@ -79,7 +79,7 @@ const Dashboard: React.FC<DashboardProps> = ({ photos, refreshPhotos, onLogout }
       
       const newUploads = await Promise.all(files.map(async (file) => {
         // Resize immediately for preview and storage
-        const resized = await resizeImage(file, 800, 0.8);
+        const resized = await resizeImage(file, 1200, 0.85); // Increased quality for persistent storage
         return {
           file,
           preview: resized,
@@ -143,32 +143,47 @@ const Dashboard: React.FC<DashboardProps> = ({ photos, refreshPhotos, onLogout }
     }
   };
 
-  const handlePublishAll = () => {
+  const handlePublishAll = async () => {
+    setIsPublishing(true);
     let count = 0;
-    uploads.forEach(item => {
-      if (!item.title) item.title = "Untitled"; // Fallback
-      
-      const newPhoto: Photo = {
-        id: crypto.randomUUID(),
-        url: item.preview,
-        title: item.title,
-        description: item.description,
-        tags: item.tags.split(',').map(t => t.trim()).filter(t => t),
-        dateUploaded: Date.now()
-      };
-      savePhoto(newPhoto);
-      count++;
-    });
+    
+    try {
+      const promises = uploads.map(item => {
+        const finalTitle = item.title || "Untitled";
+        
+        const newPhoto: Photo = {
+          id: crypto.randomUUID(),
+          url: item.preview,
+          title: finalTitle,
+          description: item.description,
+          tags: item.tags.split(',').map(t => t.trim()).filter(t => t),
+          dateUploaded: Date.now()
+        };
+        return savePhoto(newPhoto);
+      });
 
-    setUploads([]);
-    refreshPhotos();
-    alert(`Successfully published ${count} photos.`);
+      await Promise.all(promises);
+      count = promises.length;
+
+      setUploads([]);
+      await refreshPhotos();
+      alert(`Successfully published ${count} photos.`);
+    } catch (error) {
+      console.error("Publishing error:", error);
+      alert("Failed to publish some photos.");
+    } finally {
+      setIsPublishing(false);
+    }
   };
 
-  const handleDelete = (id: string) => {
-    if (confirm("Are you sure you want to delete this photo?")) {
-      deletePhoto(id);
-      refreshPhotos();
+  const handleDelete = async (id: string) => {
+    if (confirm("Are you sure you want to delete this photo permanently?")) {
+      try {
+        await deletePhoto(id);
+        await refreshPhotos();
+      } catch (error) {
+        alert("Failed to delete photo.");
+      }
     }
   };
 
@@ -191,17 +206,19 @@ const Dashboard: React.FC<DashboardProps> = ({ photos, refreshPhotos, onLogout }
           {uploads.length > 0 && (
              <button 
                onClick={handlePublishAll}
-               className="bg-white text-black px-4 py-2 rounded-lg font-bold text-sm hover:bg-gray-200 transition-colors"
+               disabled={isPublishing}
+               className="bg-white text-black px-4 py-2 rounded-lg font-bold text-sm hover:bg-gray-200 transition-colors disabled:opacity-50 flex items-center gap-2"
              >
-               Publish {uploads.length} Photos
+               {isPublishing ? <Loader2 className="animate-spin" size={16} /> : null}
+               {isPublishing ? 'Publishing...' : `Publish ${uploads.length} Photos`}
              </button>
           )}
         </div>
 
         {uploads.length === 0 ? (
           <div 
-            onClick={() => fileInputRef.current?.click()}
-            className="border-2 border-dashed border-white/10 rounded-xl p-12 flex flex-col items-center justify-center text-secondary hover:border-accent hover:text-accent transition-colors cursor-pointer"
+            onClick={() => !isUploading && fileInputRef.current?.click()}
+            className={`border-2 border-dashed border-white/10 rounded-xl p-12 flex flex-col items-center justify-center text-secondary transition-colors cursor-pointer ${isUploading ? 'opacity-50' : 'hover:border-accent hover:text-accent'}`}
           >
             <input 
               type="file" 
@@ -210,10 +227,11 @@ const Dashboard: React.FC<DashboardProps> = ({ photos, refreshPhotos, onLogout }
               className="hidden" 
               ref={fileInputRef}
               onChange={handleFileSelect}
+              disabled={isUploading}
             />
             {isUploading ? <Loader2 className="animate-spin mb-2" size={32} /> : <ImageIcon className="mb-2" size={32} />}
-            <p className="font-medium">Click to select photos</p>
-            <p className="text-xs mt-1 text-white/40">Supported: JPG, PNG, WEBP</p>
+            <p className="font-medium">{isUploading ? 'Processing images...' : 'Click to select photos'}</p>
+            <p className="text-xs mt-1 text-white/40">Supported: JPG, PNG, WEBP (Saved to Persistent Storage)</p>
           </div>
         ) : (
           <div className="space-y-4">
@@ -263,7 +281,7 @@ const Dashboard: React.FC<DashboardProps> = ({ photos, refreshPhotos, onLogout }
               </div>
             ))}
              <div 
-               onClick={() => fileInputRef.current?.click()}
+               onClick={() => !isPublishing && fileInputRef.current?.click()}
                className="border border-dashed border-white/10 rounded-xl p-4 flex items-center justify-center text-secondary hover:bg-white/5 cursor-pointer transition-colors"
              >
                 <input 
@@ -273,6 +291,7 @@ const Dashboard: React.FC<DashboardProps> = ({ photos, refreshPhotos, onLogout }
                   className="hidden" 
                   ref={fileInputRef}
                   onChange={handleFileSelect}
+                  disabled={isPublishing}
                 />
                 <span className="flex items-center gap-2 text-sm font-medium"><Plus size={16} /> Add more photos</span>
              </div>
@@ -292,6 +311,7 @@ const Dashboard: React.FC<DashboardProps> = ({ photos, refreshPhotos, onLogout }
                   <button 
                     onClick={() => handleDelete(photo.id)}
                     className="bg-red-500/80 p-2 rounded-full text-white hover:bg-red-600 transition-colors"
+                    title="Delete photo"
                   >
                     <Trash2 size={20} />
                   </button>

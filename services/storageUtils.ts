@@ -1,6 +1,9 @@
 import { Photo } from '../types';
 
-const STORAGE_KEY = 'lumina_portfolio_photos';
+const DB_NAME = 'LuminaPortfolioDB';
+const STORE_NAME = 'photos';
+const DB_VERSION = 1;
+const LOCAL_STORAGE_KEY = 'lumina_portfolio_photos';
 
 // Initial mock data to populate if empty
 const INITIAL_PHOTOS: Photo[] = [
@@ -46,47 +49,111 @@ const INITIAL_PHOTOS: Photo[] = [
   },
 ];
 
-export const getPhotos = (): Photo[] => {
-  try {
-    const stored = localStorage.getItem(STORAGE_KEY);
-    if (!stored) {
-      // Initialize with mock data
-      localStorage.setItem(STORAGE_KEY, JSON.stringify(INITIAL_PHOTOS));
-      return INITIAL_PHOTOS;
-    }
-    return JSON.parse(stored);
-  } catch (error) {
-    console.error("Failed to load photos", error);
-    return [];
-  }
+// Open Database Helper
+const openDB = (): Promise<IDBDatabase> => {
+  return new Promise((resolve, reject) => {
+    const request = indexedDB.open(DB_NAME, DB_VERSION);
+
+    request.onerror = (event) => {
+      console.error("IndexedDB error:", request.error);
+      reject("Error opening database");
+    };
+
+    request.onsuccess = (event) => {
+      resolve(request.result);
+    };
+
+    request.onupgradeneeded = (event) => {
+      const db = (event.target as IDBOpenDBRequest).result;
+      if (!db.objectStoreNames.contains(STORE_NAME)) {
+        db.createObjectStore(STORE_NAME, { keyPath: 'id' });
+      }
+    };
+  });
 };
 
-export const savePhoto = (photo: Photo): Photo[] => {
-  const current = getPhotos();
-  const updated = [photo, ...current];
-  try {
-    localStorage.setItem(STORAGE_KEY, JSON.stringify(updated));
-  } catch (e) {
-    alert("Storage full! Please delete some photos or use smaller images.");
-  }
-  return updated;
+// Initialize Storage (Migrate from LocalStorage if needed)
+export const initStorage = async (): Promise<void> => {
+  const db = await openDB();
+  
+  return new Promise((resolve, reject) => {
+    const transaction = db.transaction([STORE_NAME], 'readwrite');
+    const store = transaction.objectStore(STORE_NAME);
+    const countRequest = store.count();
+
+    countRequest.onsuccess = () => {
+      if (countRequest.result === 0) {
+        // Check for Legacy LocalStorage Data
+        const localData = localStorage.getItem(LOCAL_STORAGE_KEY);
+        if (localData) {
+          try {
+            const parsedData: Photo[] = JSON.parse(localData);
+            console.log("Migrating data from LocalStorage to IndexedDB...");
+            parsedData.forEach(photo => store.add(photo));
+            // Optional: Clear local storage after migration
+            // localStorage.removeItem(LOCAL_STORAGE_KEY); 
+          } catch (e) {
+            console.error("Migration failed", e);
+            INITIAL_PHOTOS.forEach(photo => store.add(photo));
+          }
+        } else {
+          // Seed with initial data
+          INITIAL_PHOTOS.forEach(photo => store.add(photo));
+        }
+      }
+      resolve();
+    };
+
+    countRequest.onerror = () => reject(countRequest.error);
+  });
 };
 
-export const deletePhoto = (id: string): Photo[] => {
-  const current = getPhotos();
-  const updated = current.filter(p => p.id !== id);
-  localStorage.setItem(STORAGE_KEY, JSON.stringify(updated));
-  return updated;
+export const getPhotos = async (): Promise<Photo[]> => {
+  const db = await openDB();
+  return new Promise((resolve, reject) => {
+    const transaction = db.transaction([STORE_NAME], 'readonly');
+    const store = transaction.objectStore(STORE_NAME);
+    const request = store.getAll();
+
+    request.onsuccess = () => {
+      // Sort by date descending
+      const photos = request.result as Photo[];
+      resolve(photos.sort((a, b) => b.dateUploaded - a.dateUploaded));
+    };
+
+    request.onerror = () => reject(request.error);
+  });
 };
 
-export const updatePhoto = (updatedPhoto: Photo): Photo[] => {
-  const current = getPhotos();
-  const updated = current.map(p => p.id === updatedPhoto.id ? updatedPhoto : p);
-  localStorage.setItem(STORAGE_KEY, JSON.stringify(updated));
-  return updated;
+export const savePhoto = async (photo: Photo): Promise<void> => {
+  const db = await openDB();
+  return new Promise((resolve, reject) => {
+    const transaction = db.transaction([STORE_NAME], 'readwrite');
+    const store = transaction.objectStore(STORE_NAME);
+    const request = store.put(photo); // put updates if exists, adds if not
+
+    request.onsuccess = () => resolve();
+    request.onerror = () => reject(request.error);
+  });
 };
 
-// Utility to resize image to prevent LocalStorage quota exceeded
+export const deletePhoto = async (id: string): Promise<void> => {
+  const db = await openDB();
+  return new Promise((resolve, reject) => {
+    const transaction = db.transaction([STORE_NAME], 'readwrite');
+    const store = transaction.objectStore(STORE_NAME);
+    const request = store.delete(id);
+
+    request.onsuccess = () => resolve();
+    request.onerror = () => reject(request.error);
+  });
+};
+
+export const updatePhoto = async (updatedPhoto: Photo): Promise<void> => {
+  return savePhoto(updatedPhoto);
+};
+
+// Utility to resize image (Helper remains sync/promise based but strictly purely computational)
 export const resizeImage = (file: File, maxWidth = 1000, quality = 0.7): Promise<string> => {
   return new Promise((resolve, reject) => {
     const reader = new FileReader();
@@ -107,8 +174,12 @@ export const resizeImage = (file: File, maxWidth = 1000, quality = 0.7): Promise
         elem.width = width;
         elem.height = height;
         const ctx = elem.getContext('2d');
-        ctx?.drawImage(img, 0, 0, width, height);
-        resolve(elem.toDataURL('image/jpeg', quality));
+        if (ctx) {
+            ctx.drawImage(img, 0, 0, width, height);
+            resolve(elem.toDataURL('image/jpeg', quality));
+        } else {
+            reject(new Error("Could not get canvas context"));
+        }
       };
       img.onerror = (error) => reject(error);
     };
