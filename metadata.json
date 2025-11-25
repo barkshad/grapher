@@ -1,0 +1,5 @@
+{
+  "name": "Lumina Portfolio",
+  "description": "A professional photography portfolio application featuring a high-performance masonry gallery, AI-powered photo tagging/captioning, and a secure admin panel for content management.",
+  "requestFramePermissions": []
+}
